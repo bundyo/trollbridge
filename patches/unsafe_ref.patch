@@ -1,0 +1,375 @@
+diff -u original/qml.v1/bridge.go qml.v1/bridge.go
+--- original/qml.v1/bridge.go	2016-04-28 00:29:02.000000000 +0300
++++ qml.v1/bridge.go	2016-05-05 00:38:57.000000000 +0300
+@@ -243,6 +243,35 @@
+ 	owner  valueOwner
+ }
+ 
++// cgoFolds holds all fold values that get reference to on the cgo space.
++// Since Go Pointer are not allowed to be held by cgo. We need a lookup
++// table to interface the two space.
++var cgoFolds = make(map[C.GoRef]*valueFold)
++
++// GoRef index the valueFold value and return a lookup
++// key (C.GoRef), so that we can retrieve the fold using
++// the C.GoRef. need to cross between go and cgo
++func (f *valueFold) goRef() C.GoRef {
++	ref := C.GoRef(uintptr(unsafe.Pointer(f)))
++	cgoFolds[ref] = f
++	return ref
++}
++
++// destroyRef remove the valueFold reference from the lookup table.
++func (f *valueFold) destroyRef() {
++	ref := C.GoRef(uintptr(unsafe.Pointer(f)))
++	delete(cgoFolds, ref)
++}
++
++// getFoldFromGoRef return the valueFold value located at ref
++func getFoldFromGoRef(ref C.GoRef) *valueFold {
++	fold := cgoFolds[ref]
++	if fold == nil {
++		panic("cannot find fold go reference")
++	}
++	return fold
++}
++
+ type valueOwner uint8
+ 
+ const (
+@@ -250,16 +279,6 @@
+ 	jsOwner
+ )
+ 
+-func storeFold(fold *valueFold) C.GoRef {
+-	foldRef := uintptr(unsafe.Pointer(fold))
+-	foldRefs[foldRef] = fold
+-	return C.GoRef(foldRef)
+-}
+-
+-func restoreFold(ref uintptr) *valueFold {
+-	return foldRefs[ref]
+-}
+-
+ // wrapGoValue creates a new GoValue object in C++ land wrapping
+ // the Go value contained in the given interface.
+ //
+@@ -301,7 +320,7 @@
+ 		gvalue: gvalue,
+ 		owner:  owner,
+ 	}
+-	fold.cvalue = C.newGoValue(storeFold(fold), typeInfo(gvalue), parent)
++	fold.cvalue = C.newGoValue(fold.goRef(), typeInfo(gvalue), parent)
+ 	if prev != nil {
+ 		// Put new fold first so the single cppOwner, if any, is always the first entry.
+ 		fold.next = prev
+@@ -339,10 +358,15 @@
+ var typeNew = make(map[*valueFold]bool)
+ 
+ //export hookGoValueTypeNew
+-func hookGoValueTypeNew(cvalue unsafe.Pointer, specp unsafe.Pointer) (foldr C.GoRef) {
++func hookGoValueTypeNew(cvalue unsafe.Pointer, specr C.GoTypeSpec_) (foldr C.GoRef) {
+ 	// Initialization is postponed until the engine is available, so that
+ 	// we can hand Init the qml.Object that represents the object.
+-	init := reflect.ValueOf((*TypeSpec)(specp).Init)
++	spec := types[specr]
++	if spec == nil {
++		panic("cannot find the specified TypeSpec")
++	}
++
++	init := reflect.ValueOf(spec.Init)
+ 	fold := &valueFold{
+ 		init:   init,
+ 		gvalue: reflect.New(init.Type().In(0).Elem()).Interface(),
+@@ -353,17 +377,18 @@
+ 	typeNew[fold] = true
+ 	//fmt.Printf("[DEBUG] value alive (type-created): cvalue=%x gvalue=%x/%#v\n", fold.cvalue, addrOf(fold.gvalue), fold.gvalue)
+ 	stats.valuesAlive(+1)
+-	return storeFold(fold)
++	return fold.goRef()
+ }
+ 
+ //export hookGoValueDestroyed
+-func hookGoValueDestroyed(enginep unsafe.Pointer, foldr uintptr) {
+-	fold := restoreFold(foldr)
++func hookGoValueDestroyed(enginep unsafe.Pointer, foldr C.GoRef) {
++	fold := getFoldFromGoRef(foldr)
+ 
+ 	engine := fold.engine
+ 	if engine == nil {
+ 		before := len(typeNew)
+ 		delete(typeNew, fold)
++		fold.destroyRef()
+ 		if len(typeNew) == before {
+ 			panic("destroying value without an associated engine; who created the value?")
+ 		}
+@@ -394,6 +419,7 @@
+ 				delete(engines, engine.addr)
+ 			}
+ 		}
++		fold.destroyRef()
+ 	}
+ 	//fmt.Printf("[DEBUG] value destroyed: cvalue=%x gvalue=%x/%#v\n", fold.cvalue, addrOf(fold.gvalue), fold.gvalue)
+ 	stats.valuesAlive(-1)
+@@ -412,7 +438,7 @@
+ }
+ 
+ //export hookGoValueReadField
+-func hookGoValueReadField(enginep unsafe.Pointer, foldr uintptr, reflectIndex, getIndex, setIndex C.int, resultdv *C.DataValue) {
++func hookGoValueReadField(enginep unsafe.Pointer, foldr C.GoRef, reflectIndex, getIndex, setIndex C.int, resultdv *C.DataValue) {
+ 	fold := ensureEngine(enginep, foldr)
+ 
+ 	var field reflect.Value
+@@ -458,7 +484,7 @@
+ }
+ 
+ //export hookGoValueWriteField
+-func hookGoValueWriteField(enginep unsafe.Pointer, foldr uintptr, reflectIndex, setIndex C.int, assigndv *C.DataValue) {
++func hookGoValueWriteField(enginep unsafe.Pointer, foldr C.GoRef, reflectIndex, setIndex C.int, assigndv *C.DataValue) {
+ 	fold := ensureEngine(enginep, foldr)
+ 	v := reflect.ValueOf(fold.gvalue)
+ 	ve := v
+@@ -535,7 +561,7 @@
+ )
+ 
+ //export hookGoValueCallMethod
+-func hookGoValueCallMethod(enginep unsafe.Pointer, foldr uintptr, reflectIndex C.int, args *C.DataValue) {
++func hookGoValueCallMethod(enginep unsafe.Pointer, foldr C.GoRef, reflectIndex C.int, args *C.DataValue) {
+ 	fold := ensureEngine(enginep, foldr)
+ 	v := reflect.ValueOf(fold.gvalue)
+ 
+@@ -600,7 +626,7 @@
+ }
+ 
+ //export hookGoValuePaint
+-func hookGoValuePaint(enginep unsafe.Pointer, foldr uintptr, reflectIndex C.intptr_t) {
++func hookGoValuePaint(enginep unsafe.Pointer, foldr C.GoRef, reflectIndex C.intptr_t) {
+ 	// Besides a convenience this is a workaround for http://golang.org/issue/8588
+ 	defer printPaintPanic()
+ 	defer atomic.StoreUintptr(&guiPaintRef, 0)
+@@ -620,8 +646,8 @@
+ 	method.Call([]reflect.Value{reflect.ValueOf(painter)})
+ }
+ 
+-func ensureEngine(enginep unsafe.Pointer, foldr uintptr) *valueFold {
+-	fold := restoreFold(foldr)
++func ensureEngine(enginep unsafe.Pointer, foldr C.GoRef) *valueFold {
++	fold := getFoldFromGoRef(foldr)
+ 	if fold.engine != nil {
+ 		if fold.init.IsValid() {
+ 			initGoType(fold)
+@@ -689,22 +715,22 @@
+ }
+ 
+ //export hookListPropertyAt
+-func hookListPropertyAt(foldr uintptr, reflectIndex, setIndex C.intptr_t, index C.int) (objp unsafe.Pointer) {
+-	fold := restoreFold(foldr)
++func hookListPropertyAt(foldr C.GoRef, reflectIndex, setIndex C.intptr_t, index C.int) (objp unsafe.Pointer) {
++	fold := getFoldFromGoRef(foldr)
+ 	slice := listSlice(fold, reflectIndex)
+ 	return (*slice)[int(index)].Common().addr
+ }
+ 
+ //export hookListPropertyCount
+-func hookListPropertyCount(foldr uintptr, reflectIndex, setIndex C.intptr_t) C.int {
+-	fold := restoreFold(foldr)
++func hookListPropertyCount(foldr C.GoRef, reflectIndex, setIndex C.intptr_t) C.int {
++	fold := getFoldFromGoRef(foldr)
+ 	slice := listSlice(fold, reflectIndex)
+ 	return C.int(len(*slice))
+ }
+ 
+ //export hookListPropertyAppend
+-func hookListPropertyAppend(foldr uintptr, reflectIndex, setIndex C.intptr_t, objp unsafe.Pointer) {
+-	fold := restoreFold(foldr)
++func hookListPropertyAppend(foldr C.GoRef, reflectIndex, setIndex C.intptr_t, objp unsafe.Pointer) {
++	fold := getFoldFromGoRef(foldr)
+ 	slice := listSlice(fold, reflectIndex)
+ 	var objdv C.DataValue
+ 	objdv.dataType = C.DTObject
+@@ -718,8 +744,8 @@
+ }
+ 
+ //export hookListPropertyClear
+-func hookListPropertyClear(foldr uintptr, reflectIndex, setIndex C.intptr_t) {
+-	fold := restoreFold(foldr)
++func hookListPropertyClear(foldr C.GoRef, reflectIndex, setIndex C.intptr_t) {
++	fold := getFoldFromGoRef(foldr)
+ 	slice := listSlice(fold, reflectIndex)
+ 	newslice := (*slice)[0:0]
+ 	if setIndex >= 0 {
+Common subdirectories: original/qml.v1/cdata and qml.v1/cdata
+Common subdirectories: original/qml.v1/cmd and qml.v1/cmd
+Common subdirectories: original/qml.v1/cpp and qml.v1/cpp
+Common subdirectories: original/qml.v1/cpptest and qml.v1/cpptest
+diff -u original/qml.v1/datatype.go qml.v1/datatype.go
+--- original/qml.v1/datatype.go	2016-04-28 00:29:02.000000000 +0300
++++ qml.v1/datatype.go	2016-05-05 00:42:46.000000000 +0300
+@@ -163,7 +163,7 @@
+ 	case C.DTGoAddr:
+ 		// ObjectByName also does this fold conversion, to have access
+ 		// to the cvalue. Perhaps the fold should be returned.
+-		fold := ensureEngine(engine.addr, uintptr(datap))
++		fold := ensureEngine(engine.addr, C.GoRef(uintptr(datap)))
+ 		return fold.gvalue
+ 	case C.DTInvalid:
+ 		return nil
+Common subdirectories: original/qml.v1/examples and qml.v1/examples
+Common subdirectories: original/qml.v1/gl and qml.v1/gl
+diff -u original/qml.v1/qml.go qml.v1/qml.go
+--- original/qml.v1/qml.go	2016-04-28 00:29:02.000000000 +0300
++++ qml.v1/qml.go	2016-05-05 02:05:23.000000000 +0300
+@@ -140,7 +140,7 @@
+ 	cloc, cloclen := unsafeStringData(location)
+ 	comp := &Common{engine: e}
+ 	RunMain(func() {
+-		//TODO The component's parent should probably be the engine.
++		// TODO The component's parent should probably be the engine.
+ 		comp.addr = C.newComponent(e.addr, nilPtr)
+ 		if qrc {
+ 			C.componentLoadURL(comp.addr, cloc, cloclen)
+@@ -258,12 +258,13 @@
+ 	if _, ok := e.imageProviders[prvId]; ok {
+ 		panic(fmt.Sprintf("engine already has an image provider with id %q", prvId))
+ 	}
++	funcr := C.GoRef(uintptr(unsafe.Pointer(&f)))
+ 	e.imageProviders[prvId] = &f
+ 	cprvId, cprvIdLen := unsafeStringData(prvId)
+ 	RunMain(func() {
+ 		qprvId := C.newString(cprvId, cprvIdLen)
+ 		defer C.delString(qprvId)
+-		C.engineAddImageProvider(e.addr, qprvId, unsafe.Pointer(&f))
++		C.engineAddImageProvider(e.addr, qprvId, funcr)
+ 	})
+ }
+ 
+@@ -522,7 +523,7 @@
+ 	RunMain(func() {
+ 		var foldr C.GoRef
+ 		if cerr = C.objectGoRef(obj.addr, &foldr); cerr == nil {
+-			fold := restoreFold(uintptr(foldr))
++			fold := getFoldFromGoRef(foldr)
+ 			result = fold.gvalue
+ 		}
+ 	})
+@@ -822,7 +823,7 @@
+ 	})
+ }
+ 
+-var connectedFunction = make(map[*interface{}]bool)
++var connectedFunction = make(map[C.GoRef]interface{})
+ 
+ // On connects the named signal from obj with the provided function, so that
+ // when obj next emits that signal, the function is called with the parameters
+@@ -856,9 +857,10 @@
+ 	csignal, csignallen := unsafeStringData(signal)
+ 	var cerr *C.error
+ 	RunMain(func() {
+-		cerr = C.objectConnect(obj.addr, csignal, csignallen, obj.engine.addr, unsafe.Pointer(&function), C.int(funcv.Type().NumIn()))
++		funcr := C.GoRef(uintptr(unsafe.Pointer(&function)))
++		cerr = C.objectConnect(obj.addr, csignal, csignallen, obj.engine.addr, funcr, C.int(funcv.Type().NumIn()))
+ 		if cerr == nil {
+-			connectedFunction[&function] = true
++			connectedFunction[funcr] = function
+ 			stats.connectionsAlive(+1)
+ 		}
+ 	})
+@@ -866,9 +868,9 @@
+ }
+ 
+ //export hookSignalDisconnect
+-func hookSignalDisconnect(funcp unsafe.Pointer) {
++func hookSignalDisconnect(funcr C.GoRef) {
+ 	before := len(connectedFunction)
+-	delete(connectedFunction, (*interface{})(funcp))
++	delete(connectedFunction, funcr)
+ 	if before == len(connectedFunction) {
+ 		panic("disconnecting unknown signal function")
+ 	}
+@@ -876,12 +878,18 @@
+ }
+ 
+ //export hookSignalCall
+-func hookSignalCall(enginep unsafe.Pointer, funcp unsafe.Pointer, args *C.DataValue) {
++func hookSignalCall(enginep unsafe.Pointer, funcr C.GoRef, args *C.DataValue) {
+ 	engine := engines[enginep]
+ 	if engine == nil {
+ 		panic("signal called after engine was destroyed")
+ 	}
+-	funcv := reflect.ValueOf(*(*interface{})(funcp))
++
++	function := connectedFunction[funcr]
++	if function == nil {
++		panic("signal called on disconnected function")
++	}
++
++	funcv := reflect.ValueOf(&function)
+ 	funct := funcv.Type()
+ 	numIn := funct.NumIn()
+ 	var params [C.MaxParams]reflect.Value
+@@ -967,7 +975,7 @@
+ 	var m sync.Mutex
+ 	m.Lock()
+ 	RunMain(func() {
+-		// TODO  Must be able to wait for the same Window from multiple goroutines.
++		// TODO Must be able to wait for the same Window from multiple goroutines.
+ 		// TODO If the window is not visible, must return immediately.
+ 		waitingWindows[win.addr] = &m
+ 		// BUG: Exiting on window hidden will fail on SailfishOS when cover image is shown app will exit
+@@ -1056,7 +1064,7 @@
+ 	private struct{} // Force use of fields by name.
+ }
+ 
+-var types []*TypeSpec
++var types = make(map[C.GoTypeSpec_]*TypeSpec)
+ 
+ // RegisterTypes registers the provided list of type specifications for use
+ // by QML code. To access the registered types, they must be imported from the
+@@ -1112,10 +1120,11 @@
+ 		cloc := C.CString(location)
+ 		cname := C.CString(localSpec.Name)
+ 		cres := C.int(0)
++		localSpecRef := C.GoTypeSpec_(uintptr(unsafe.Pointer(&localSpec)))
+ 		if localSpec.Singleton {
+-			cres = C.registerSingleton(cloc, C.int(major), C.int(minor), cname, customType, unsafe.Pointer(&localSpec))
++			cres = C.registerSingleton(cloc, C.int(major), C.int(minor), cname, customType, localSpecRef)
+ 		} else {
+-			cres = C.registerType(cloc, C.int(major), C.int(minor), cname, customType, unsafe.Pointer(&localSpec))
++			cres = C.registerType(cloc, C.int(major), C.int(minor), cname, customType, localSpecRef)
+ 		}
+ 		// It doesn't look like it keeps references to these, but it's undocumented and unclear.
+ 		C.free(unsafe.Pointer(cloc))
+@@ -1123,7 +1132,7 @@
+ 		if cres == -1 {
+ 			err = fmt.Errorf("QML engine failed to register type; invalid type location or name?")
+ 		} else {
+-			types = append(types, &localSpec)
++			types[localSpecRef] = &localSpec
+ 		}
+ 	})
+ 
+@@ -1154,9 +1163,9 @@
+ 	} else if len(r.bdata) > 0 {
+ 		base = *(*unsafe.Pointer)(unsafe.Pointer(&r.bdata))
+ 	}
+-	tree := (*C.char)(unsafe.Pointer(uintptr(base) + uintptr(r.treeOffset)))
+-	name := (*C.char)(unsafe.Pointer(uintptr(base) + uintptr(r.nameOffset)))
+-	data := (*C.char)(unsafe.Pointer(uintptr(base) + uintptr(r.dataOffset)))
++	tree := (*C.char)(unsafe.Pointer(uintptr(base)+uintptr(r.treeOffset)))
++	name := (*C.char)(unsafe.Pointer(uintptr(base)+uintptr(r.nameOffset)))
++	data := (*C.char)(unsafe.Pointer(uintptr(base)+uintptr(r.dataOffset)))
+ 	C.registerResourceData(C.int(r.version), tree, name, data)
+ }
+ 
+@@ -1168,8 +1177,8 @@
+ 	} else if len(r.bdata) > 0 {
+ 		base = *(*unsafe.Pointer)(unsafe.Pointer(&r.bdata))
+ 	}
+-	tree := (*C.char)(unsafe.Pointer(uintptr(base) + uintptr(r.treeOffset)))
+-	name := (*C.char)(unsafe.Pointer(uintptr(base) + uintptr(r.nameOffset)))
+-	data := (*C.char)(unsafe.Pointer(uintptr(base) + uintptr(r.dataOffset)))
++	tree := (*C.char)(unsafe.Pointer(uintptr(base)+uintptr(r.treeOffset)))
++	name := (*C.char)(unsafe.Pointer(uintptr(base)+uintptr(r.nameOffset)))
++	data := (*C.char)(unsafe.Pointer(uintptr(base)+uintptr(r.dataOffset)))
+ 	C.unregisterResourceData(C.int(r.version), tree, name, data)
+ }
