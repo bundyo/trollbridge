@@ -7,10 +7,39 @@ Page {
     
     onStatusChanged: {
         if (status == PageStatus.Deactivating && _navigation == PageNavigation.Back) {
-            console.log("clear selection");
-            bridge.clearAllSelection();
             if (bridge.OPC) {
                 bridge.switchMode("standalone");
+            }
+        }
+    }
+    
+    ListModel {
+        id: photoModel
+        objectName: "photoModel"
+        
+        property var addItem: null
+        onAddItemChanged: { 
+            if (addItem !== null) {
+                this.append(addItem);
+            }
+        }
+        
+        property var item: null
+        property var setIndex: null
+        onSetIndexChanged: {
+            if (setIndex !== null && item !== null) {
+                console.log("setIndex: " + item.index, item.downloading, item.downloaded)
+                this.set(findInModel(setIndex), item);
+                item = null;
+                setIndex = null;
+            }
+        }
+        
+        function findInModel(idx) {
+            for (var i = 0, len = photoModel.count; i < len; i++) {
+                if (photoModel.get(i).index === idx) {
+                    return i;
+                }
             }
         }
     }
@@ -21,7 +50,7 @@ Page {
         anchors.fill: parent
         cellWidth: parent.width / Math.round(parent.width / 200)
         cellHeight: cellWidth
-        model: bridge.fileLen
+        model: photoModel
         height: parent.height
         
         PullDownMenu {
@@ -98,7 +127,6 @@ Page {
                     pdMain.action = "";
                     
                     if (pdMain.subAction) {
-                        thumbGridView.forceLayout();
                         pdMain.subAction();
                         thumbGridView.forceLayout();
                     }
@@ -111,9 +139,11 @@ Page {
         
             width: ( parent.width - ( 2.0 * Theme.paddingLarge ))
             height: 110
-            x: Theme.paddingLarge
-        
             spacing: 0
+            x: Theme.paddingLarge
+            
+            // Aargh!
+            Rectangle { height: Theme.paddingMedium; width: parent.width; color: "transparent" }
         
             Label {
                 id: firstHeader
@@ -150,15 +180,37 @@ Page {
                 cache: true
                 smooth: !thumbDelegate.GridView.view.moving
                 fillMode: Image.PreserveAspectCrop
-                source: bridge.getImage(index).trollPath
+                source: trollPath
             }
 
             Loader {
                 anchors.centerIn: parent
-                visible: bridge.getImage(index).downloading || thumbImage.status == Image.Loading
+                visible: downloading || thumbImage.status == Image.Loading
                 sourceComponent: thumbBusy
 
-                Component { id: thumbBusy; BusyIndicator { running: true } }
+                Component { 
+                    id: thumbBusy 
+                    
+                    BusyIndicator { 
+                        running: true 
+                        visible: !downloading
+                    } 
+                }
+                
+                Image {
+                    width: parent.width - 4
+                    height: width
+                    anchors.centerIn: parent
+                    visible: downloading
+                    source: "image://theme/icon-m-sync"
+                    
+                    RotationAnimation on rotation {
+                        loops: Animation.Infinite
+                        duration: 1000
+                        from: 0
+                        to: 360
+                    }
+                }
             }
             
             Rectangle {
@@ -167,7 +219,7 @@ Page {
                 height: width
                 color: "#FFF"
                 radius: width
-                visible: bridge.getImage(index).selected && imageList.mode === "Download"
+                visible: selected && imageList.mode === "Download"
                 anchors { right: parent.right; top: parent.top; margins: 5 }
 
                 Image {
@@ -184,7 +236,7 @@ Page {
                 height: width
                 color: "red"
                 radius: width
-                visible: bridge.getImage(index).selected && imageList.mode === "Delete"
+                visible: selected && imageList.mode === "Delete"
                 anchors { right: parent.right; top: parent.top; margins: 5 }
                 border.color: "white"
                 border.width: 2
@@ -192,7 +244,7 @@ Page {
                 Image {
                     width: parent.width - 4
                     height: width
-                    anchors { horizontalCenter: parent.horizontalCenter; verticalCenter: parent.verticalCenter }
+                    anchors.centerIn: parent
                     source: "image://theme/icon-cover-cancel?#FFF"
                 }
             }
@@ -203,7 +255,7 @@ Page {
                 height: width
                 color: "#369"
                 radius: width
-                visible: bridge.getImage(index).downloaded
+                visible: downloaded
                 anchors { right: parent.right; bottom: parent.bottom; margins: 5 }
                 border.color: "white"
                 border.width: 2
@@ -212,10 +264,33 @@ Page {
                     width: parent.width - 4
                     height: width
                     anchors.centerIn: parent
-                    source: "image://theme/" + (bridge.getImage(index).quarter ? "icon-m-scale" : "icon-m-tabs") + "?#FFF"
+                    source: "image://theme/" + (quarter ? "icon-m-scale" : "icon-m-tabs") + "?#FFF"
                 }
             }
             
+            Rectangle {
+                id: checkboxType
+                width: 48
+                height: width
+                color: type === "JPG" ? "darkorange" : "tomato"
+                radius: width
+                visible: type
+                anchors { left: parent.left; bottom: parent.bottom; margins: 5 }
+                border.color: "white"
+                border.width: 2
+
+                Label {
+                    width: parent.width - 2
+                    height: width
+                    color: "white"
+                    font.bold: true
+                    font.pixelSize: Theme.fontSizeTiny
+                    verticalAlignment: Text.AlignVCenter
+                    horizontalAlignment: Text.AlignHCenter
+                    text: type.toUpperCase()
+                }
+            }
+
             Rectangle {
                 id: selectedIndicator
                 anchors.fill: parent
@@ -228,9 +303,7 @@ Page {
                 anchors.fill: parent
                 onClicked: {
                     if (imageList.mode !== "") {
-                        thumbGridView.forceLayout();
-                        bridge.setSelection(index, !bridge.getImage(index).selected);
-                        thumbGridView.forceLayout();
+                        bridge.setSelection(index, !selected);
                     }
                 }
             }

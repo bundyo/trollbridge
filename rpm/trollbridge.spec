@@ -5,15 +5,14 @@
 
 Name:       harbour-trollbridge
 Summary:    TRaveller's OLympus Bridge
-Version:    0.1.1
-Release:    2
+Version:    0.1.2
+Release:    1
 Group:      Applications/Multimedia
-License:    GPL
+License:    MIT
 #Source0: https://github.com/example/app/archive/v%{version}.tar.gz
 #Requires:   mapplauncherd-booster-silica-qt5
 #Requires:   nemo-qml-plugin-thumbnailer-qt5
 Requires:   sailfishsilica-qt5
-#Requires:   qt5-qtdocgallery
 BuildRequires:  pkgconfig(sailfishapp)
 BuildRequires:  pkgconfig(Qt5Quick)
 BuildRequires:  pkgconfig(Qt5Qml)
@@ -77,3 +76,19 @@ desktop-file-install --delete-original       \
 %{_bindir}
 # >> files
 # << files
+
+%changelog
+* Thu May 12 2016 version 0.1.2
+- Fix occasional refresh issues (selection not showing)
+- Add file type tags (JPG/ORF)
+- Add proper RAW download support (indexes were wrong)
+- Make download loader distinctive 
+
+* Mon May 09 2016 version 0.1.1
+- Add support for Olympus Air (image download only)
+- Fix folder creation bug
+
+* Sun May 01 2016 version 0.1
+- Add support for remote shutter
+- Add support for image download
+- Add support for remote power off

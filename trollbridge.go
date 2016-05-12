@@ -17,6 +17,7 @@ import (
 	"io/ioutil"
 	"gopkg.in/qml.v1"
 	"os"
+	//"math/rand"
 	//"os/signal"
 	//"syscall"
 	"runtime"
@@ -24,7 +25,7 @@ import (
 )
 
 // VERSION Returns the app version
-const VERSION = "0.1.1"
+const VERSION = "0.1.2"
 
 var (
 	config Config
@@ -33,10 +34,11 @@ var (
 
 // File Single File record
 type File struct {
-	Index         int64
+	Index         string
 	Path          string
 	File          string
 	TrollPath     string
+	Type		  string
 	Selected      bool
 	Downloaded    bool
 	Downloading   bool
@@ -69,6 +71,7 @@ type BridgeControl struct {
 	Connected    bool
 	Downloading  bool
 	OPC			 bool
+	//socket       Socket
 }
 
 // Config is config
@@ -171,8 +174,10 @@ func run() error {
 	
 	go func() {
 		for t := range bridge.ticker.C {
-			bridge.Connect()
-			fmt.Println("Connect at", t)
+			if (!bridge.Downloading) {
+				bridge.Connect()
+				fmt.Println("Connect at", t)
+			}
 		}
 	}()
 
@@ -271,34 +276,41 @@ func (ctrl *BridgeControl) GetImage(index int) *File {
 }
 
 // SetSelection Set selection at list index
-func (ctrl *BridgeControl) SetSelection(index int, value bool) {
-	//go func() {
-		ctrl.list[index].Selected = value
-		qml.Changed(&ctrl.list[index], &ctrl.list[index].Selected)
-	//}()
+func (ctrl *BridgeControl) SetSelection(index string, value bool) {
+	for idx := range ctrl.list {
+		if ctrl.list[idx].Index == index {
+			ctrl.SetSelectionItem(idx, value)
+			return;
+		}
+	}
+}
+
+// SetSelectionItem Set selection at list index
+func (ctrl *BridgeControl) SetSelectionItem(idx int, value bool) {
+	ctrl.list[idx].Selected = value
+	
+	bridge.UpdateItem(idx)
 }
 
 // ClearAllSelection Clears the file list selection
 func (ctrl *BridgeControl) ClearAllSelection() {
 	go func() {
 		for idx := range ctrl.list {
-			ctrl.SetSelection(idx, false)
+			ctrl.SetSelectionItem(idx, false)
 		}
 	}()
 }
 
 // Download Downloads the file at index
-func (ctrl *BridgeControl) Download(index int, quarterSize bool) {
-	size := bridge.CameraDownloadFile(ctrl.list[index].Path, ctrl.list[index].File, quarterSize)
-	ctrl.list[index].Downloaded = size > -1
-	qml.Changed(&ctrl.list[index], &ctrl.list[index].Downloaded)
-	ctrl.list[index].Downloading = false
-	qml.Changed(&ctrl.list[index], &ctrl.list[index].Downloading)
-	ctrl.list[index].Selected = false
-	qml.Changed(&ctrl.list[index], &ctrl.list[index].Selected)
-	ctrl.list[index].Quarter = quarterSize
-	qml.Changed(&ctrl.list[index], &ctrl.list[index].Quarter)
-	qml.Changed(ctrl, &ctrl.FileLen)
+func (ctrl *BridgeControl) Download(idx int, quarterSize bool) {
+	size := bridge.CameraDownloadFile(ctrl.list[idx].Path, ctrl.list[idx].File, quarterSize)
+	
+	ctrl.list[idx].Downloaded = size > -1
+	ctrl.list[idx].Downloading = false
+	ctrl.list[idx].Selected = false
+	ctrl.list[idx].Quarter = quarterSize
+	
+	bridge.UpdateItem(idx)
 }
 
 // DownloadSelected Downloads all selected files
@@ -307,16 +319,17 @@ func (ctrl *BridgeControl) DownloadSelected(quarterSize bool) {
 		ctrl.Downloading = true
 		qml.Changed(ctrl, &ctrl.Downloading)
 		
-		for index := range ctrl.list {
-			if (ctrl.list[index].Selected) {
-				ctrl.list[index].Downloading = true
-				qml.Changed(&ctrl.list[index], &ctrl.list[index].Downloading)
+		for idx := range ctrl.list {
+			if (ctrl.list[idx].Selected) {
+				ctrl.list[idx].Downloading = true
+
+				bridge.UpdateItem(idx)
 			}
 		}
 
-		for index := range ctrl.list {
-			if (ctrl.list[index].Selected) {
-				ctrl.Download(index, quarterSize)
+		for idx := range ctrl.list {
+			if (ctrl.list[idx].Selected) {
+				ctrl.Download(idx, quarterSize)
 			}
 		}
 
@@ -324,6 +337,42 @@ func (ctrl *BridgeControl) DownloadSelected(quarterSize bool) {
 		qml.Changed(ctrl, &ctrl.Downloading)
 	}()
 }
+
+// UpdateItem Downloads the file at index
+func (ctrl *BridgeControl) UpdateItem(idx int) {
+	photoModel := bridge.Root.ObjectByName("photoModel")
+	photoModel.Set("item", ctrl.list[idx])
+	photoModel.Set("setIndex", ctrl.list[idx].Index)
+}
+
+// // BindToEvents Bind to cmera events
+// func (ctrl *BridgeControl) BindToEvents() {
+// 	rand.Seed(time.Now().UnixNano())
+	
+// 	port := rand.Intn(5000) + 50000
+	
+// 	ctrl.CameraExecute("start_pushevent", "port=" + port)
+	
+// //        self.eventSocket = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+// //        self.eventSocket.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+// //        self.eventSocket.settimeout(2)
+// //        self.eventSocket.connect((OlympusAir.IP,evPort))
+
+//   conn, _ := net.Dial("tcp", "192.168.0.10:" + port)
+//   for {
+//     // read in input from stdin
+//     reader := bufio.NewReader(os.Stdin)
+//     //fmt.Print("Text to send: ")
+//     //text, _ := reader.ReadString('\n')
+//     // send to socket
+//     //fmt.Fprintf(conn, text + "\n")
+//     // listen for reply
+//     message, _ := bufio.NewReader(conn).ReadString('\n')
+//     fmt.Print("Message from server: " + message)
+//   }
+// }
+
+// }
 
 // SwitchMode Switch the camera mode to rec/play/shutter
 func (ctrl *BridgeControl) SwitchMode(mode string) {
@@ -485,15 +534,21 @@ func (ctrl *BridgeControl) CameraGetFolder(path string) error {
 			
 			if len(ctrl.list) > 0 {
 				rowData = strings.Split(rows[len(rows)-1:][0], ",")
-				index, err := strconv.ParseInt(rowData[1][4:8], 10, 64)
+				dotIndex := strings.LastIndex(rowData[1], ".") + 1
+				index := rowData[1][4:8] + map[bool] string {true: "", false: rowData[1][dotIndex:]} [dotIndex == 0]
 				
 				if err != nil {}
 				
 				if index == ctrl.list[0].Index {
+					for _, row := range ctrl.list {
+						bridge.Root.ObjectByName("photoModel").Set("addItem", row)
+					}
+
 					return nil
 				}
 				
 				ctrl.list = nil
+				bridge.Root.ObjectByName("photoModel").Call("clear")
 			}
 			
 			go func() {
@@ -502,15 +557,17 @@ func (ctrl *BridgeControl) CameraGetFolder(path string) error {
 
 					if len(rowData) > 0 {
 						size, err := strconv.ParseInt(rowData[2], 10, 64)
-						index, err := strconv.ParseInt(rowData[1][4:8], 10, 64)
 						stat, err := os.Stat(config.DownloadPath + "/" + ctrl.Model + "/" + rowData[1])
+						dotIndex := strings.LastIndex(rowData[1], ".") + 1
+						fileType := map[bool] string {true: "", false: rowData[1][dotIndex:]} [dotIndex == 0]
 						
 						ctrl.list = append(ctrl.list, 
 							File { 
-								Index: index, 
+								Index: rowData[1][4:8] + fileType, 
 								Path: rowData[0], 
 								File: rowData[1],
 								TrollPath: "image://troll" + rowData[0] + "/" + rowData[1],
+								Type: fileType,
 								Size: size,
 								Downloading: false,
 								Selected: false,
@@ -521,6 +578,10 @@ func (ctrl *BridgeControl) CameraGetFolder(path string) error {
 				}
 				
 				sort.Sort(sort.Reverse(ctrl.list))
+				
+				for _, row := range ctrl.list {
+					bridge.Root.ObjectByName("photoModel").Set("addItem", row)
+				}
 
 				//fmt.Println(ctrl.list)
 				ctrl.FileLen = len(ctrl.list)

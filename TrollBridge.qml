@@ -65,6 +65,17 @@ Page {
 					pageStack.push(Qt.resolvedUrl("Shutter.qml"))
 				}
 			}
+			
+			// Button {
+			// 	text: "Live View"
+			// 	visible: bridge.connected
+			// 	anchors.horizontalCenter: parent.horizontalCenter
+			// 	onClicked: {
+			// 		bridge.switchMode("rec")
+			// 		bridge.bindToEvents()
+			// 		pageStack.push(Qt.resolvedUrl("ImageList.qml"))
+			// 	}
+			// }
 		}
 	}
 }
